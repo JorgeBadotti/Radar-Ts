@@ -9,12 +9,41 @@ interface CapturaDespesaViewProps {
   onFechar: () => void;
 }
 
-function fileParaBase64(file: File): Promise<string> {
+// Foto direta da câmera do celular costuma vir grande (vários MB) — em base64
+// isso passa fácil do limite de ~4.5MB que o corpo de uma função serverless
+// do Vercel aceita, e a requisição é rejeitada antes de chegar no nosso
+// código (erro "Request Entity Too Large", que o navegador tenta ler como
+// JSON e quebra). Reduz pra no máximo 1600px no lado maior e reexporta como
+// JPEG comprimido — sobra resolução de sobra pra IA ler texto de cupom.
+const MAX_DIMENSAO_PX = 1600;
+const QUALIDADE_JPEG = 0.7;
+
+function comprimirImagem(file: File): Promise<{ base64: string; mimeType: string }> {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => resolve((reader.result as string).split(',')[1] || '');
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const escala = Math.min(1, MAX_DIMENSAO_PX / Math.max(img.width, img.height));
+      const largura = Math.max(1, Math.round(img.width * escala));
+      const altura = Math.max(1, Math.round(img.height * escala));
+      const canvas = document.createElement('canvas');
+      canvas.width = largura;
+      canvas.height = altura;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Não foi possível processar a imagem capturada.'));
+        return;
+      }
+      ctx.drawImage(img, 0, 0, largura, altura);
+      const dataUrl = canvas.toDataURL('image/jpeg', QUALIDADE_JPEG);
+      resolve({ base64: dataUrl.split(',')[1] || '', mimeType: 'image/jpeg' });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error('Não foi possível carregar a imagem capturada.'));
+    };
+    img.src = url;
   });
 }
 
@@ -45,8 +74,8 @@ export default function CapturaDespesaView({ municipioSugerido, onFechar }: Capt
     setProcessando(true);
     setErro(null);
     try {
-      const base64 = await fileParaBase64(file);
-      const extraido = await extrairDespesa(base64, file.type);
+      const { base64, mimeType } = await comprimirImagem(file);
+      const extraido = await extrairDespesa(base64, mimeType);
       if (extraido.valor !== null) setValor(String(extraido.valor));
       if (extraido.data) setData(extraido.data);
       if (extraido.categoria) setCategoria(extraido.categoria);
